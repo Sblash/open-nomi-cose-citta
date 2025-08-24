@@ -23,7 +23,7 @@ class GameRound extends Component
     public $showVote = false;
     public $votes = [];
 
-    protected $listeners = ['timerTick' => 'decrementTimer'];
+    protected $listeners = ['timerTick' => 'decrementTimer', 'roundInterrupted' => 'handleRoundInterrupted'];
 
     public function mount(Game $game, Round $round)
     {
@@ -43,14 +43,17 @@ class GameRound extends Component
         }
 
         // Se il round è in stato di votazione, carica le parole da votare
-        if ($round->status === 'voting') {
+        if ($round->status == 'voting') {
             $this->showVote = true;
             $this->loadWordsForVoting();
         }
 
         // Avvia il timer se il round è in progress
-        if ($round->status === 'in_progress') {
+        if ($round->status == 'in_progress') {
             $this->startTimer();
+        } else {
+            // Imposta il round come finito per tutti i giocatori
+            $this->round->update(['status' => 'voting']);
         }
     }
 
@@ -68,6 +71,40 @@ class GameRound extends Component
         }
     }
 
+    public function bongAndSubmit()
+    {
+        // Salva le parole del giocatore nel database
+        foreach ($this->words as $category => $word) {
+            Word::create([
+                'round_id' => $this->round->id,
+                'player_id' => $this->player->id,
+                'category' => $category,
+                'word' => $word,
+                'status' => 'pending',
+            ]);
+        }
+
+        // Aggiorna lo stato della componente per tutti i giocatori
+        $this->showVote = true;
+        $this->loadWordsForVoting();
+
+        // Emit an event to notify all players that the round has been interrupted
+        $this->dispatch('roundInterrupted', $this->round->id);
+    }
+
+    public function handleRoundInterrupted($roundId)
+    {
+        if ($this->round->id === $roundId) {
+            // Aggiorna lo stato della componente per questo giocatore
+            $this->round->refresh();
+            $this->showVote = true;
+            $this->loadWordsForVoting();
+
+            // Imposta il round come finito per tutti i giocatori
+            $this->round->update(['status' => 'voting']);
+        }
+    }
+
     public function submitWords()
     {
         // Salva le parole del giocatore nel database
@@ -81,11 +118,18 @@ class GameRound extends Component
             ]);
         }
 
-        // Imposta il round come finito per questo giocatore
-        // In un'applicazione reale, dovremmo sincronizzare questo con tutti i giocatori
+        // Imposta il round come finito per tutti i giocatori
         $this->round->update(['status' => 'voting']);
+
+        // Aggiorna lo stato della componente per tutti i giocatori
         $this->showVote = true;
         $this->loadWordsForVoting();
+
+        // Emit an event to notify all players that the round has been interrupted
+        $this->dispatch('roundInterrupted', $this->round->id);
+
+        // Imposta il round come finito per tutti i giocatori
+        $this->round->update(['status' => 'voting']);
     }
 
     public function loadWordsForVoting()
@@ -114,9 +158,15 @@ class GameRound extends Component
         // Calcola i punteggi e passa al round successivo o termina il gioco
         $this->calculateScores();
 
+        // Imposta il round come finito per tutti i giocatori
+        $this->round->update(['status' => 'voting']);
+
+        // Emit an event to notify all players that the round has been interrupted
+        $this->dispatch('roundInterrupted', $this->round->id);
+
         if ($this->round->round_number < $this->game->settings['rounds']) {
             // Crea un nuovo round
-            $nextRoundNumber = $this->round->round_number + 1;
+            $nextRoundNumber = $this->game->rounds()->count() + 1;
             $newRound = Round::create([
                 'game_id' => $this->game->id,
                 'round_number' => $nextRoundNumber,
@@ -124,7 +174,7 @@ class GameRound extends Component
                 'status' => 'in_progress',
             ]);
 
-            return redirect()->route('game.round', ['game' => $this->game->id, 'round' => $nextRoundNumber]);
+            return redirect()->route('game.round', ['game' => $this->game->id, 'round' => $newRound->id]);
         } else {
             // Termina il gioco
             $this->game->update(['status' => 'finished']);
@@ -132,44 +182,56 @@ class GameRound extends Component
         }
     }
 
-    public function calculateScores()
-    {
-        // Logica per calcolare i punteggi basata sui voti
-        $words = Word::where('round_id', $this->round->id)->get();
+public function calculateScores()
+{
+    // Logica per calcolare i punteggi basata sui voti
+    $words = Word::where('round_id', $this->round->id)->get();
 
-        foreach ($words as $word) {
-            $votes = Vote::where('word_id', $word->id)->get();
-            $correctVotes = $votes->where('vote', true)->count();
-            $incorrectVotes = $votes->where('vote', false)->count();
+    foreach ($words as $word) {
+        $votes = Vote::where('word_id', $word->id)->get();
+        $correctVotes = $votes->where('vote', true)->count();
+        $incorrectVotes = $votes->where('vote', false)->count();
 
-            // Determina lo stato della parola basato sui voti
-            if ($correctVotes > $incorrectVotes) {
-                $word->status = 'correct';
-            } else {
-                $word->status = 'incorrect';
-            }
-            $word->save();
-
-            // Aggiorna il punteggio del giocatore
-            $player = $word->player;
-            if ($word->status === 'correct') {
-                // Controlla se la parola è unica
-                $similarWords = Word::where('round_id', $this->round->id)
-                                    ->where('category', $word->category)
-                                    ->where('word', $word->word)
-                                    ->get();
-                if ($similarWords->count() === 1) {
-                    $player->score += 10;
-                } else {
-                    $player->score += 5;
-                }
-            } else {
-                $player->score -= 5;
-            }
-            $player->save();
+        // Determina lo stato della parola basato sui voti
+        if ($correctVotes > $incorrectVotes) {
+            $word->status = 'correct';
+        } else {
+            $word->status = 'incorrect';
         }
-    }
+        $word->save();
 
+        // Aggiorna il punteggio del giocatore
+        $player = $word->player;
+        if ($word->status === 'correct') {
+            // Controlla se la parola è unica
+            $similarWords = Word::where('round_id', $this->round->id)
+                ->where('category', $word->category)
+                ->where('word', $word->word)
+                ->get();
+            if ($similarWords->count() === 1) {
+                $player->score += 10;
+            } else {
+                $player->score += 5;
+            }
+        } else {
+            $player->score -= 5;
+        }
+        $player->save();
+    }
+}
+
+public function startVoting()
+{
+    // Imposta il round come in stato di votazione
+    $this->round->update(['status' => 'voting']);
+
+    // Aggiorna lo stato della componente per tutti i giocatori
+    $this->showVote = true;
+    $this->loadWordsForVoting();
+
+    // Emit an event to notify all players that the round has been interrupted
+    $this->dispatch('roundInterrupted', $this->round->id);
+}
     public function render()
     {
         return view('livewire.game-round');

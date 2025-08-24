@@ -11,14 +11,13 @@
         </div>
         @endforeach
         <button
-            type="submit"
-            wire:click="submitWords"
-            class="bg-green-500 hover:bg-green-700 text-white font-bold py-2 px-4 rounded"
+            type="button"
+            wire:click="bongAndSubmit"
+            class="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded"
             @if(in_array('', $this->words, true)) disabled @endif
             >
             Bong!
         </button>
-
     </form>
     <div class="text-lg font-bold">Time left: {{ $timeLeft }}</div>
     @else
@@ -48,10 +47,12 @@
 
 <script>
     document.addEventListener('livewire:init', () => {
+        let timer; // Declare timer variable
+
         Livewire.on('startTimer', () => {
             setTimeout(() => { // Ritardo di 2 secondi
                 let timeLeft = 60;
-                let timer = setInterval(() => {
+                timer = setInterval(() => {
                     timeLeft--;
                     if (timeLeft <= 0) {
                         clearInterval(timer);
@@ -60,6 +61,17 @@
                     @this.call('decrementTimer');
                 }, 1000);
             }, 2000);
+        });
+
+        // Polling for roundInterrupted event
+        setInterval(() => {
+            Livewire.emit('checkRoundInterrupted');
+        }, 1000);
+
+        // Handle roundInterrupted event
+        Livewire.on('roundInterrupted', () => {
+            clearInterval(timer);
+            @this.call('startVoting');
         });
     });
 </script>
